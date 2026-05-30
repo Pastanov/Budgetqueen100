@@ -128,7 +128,6 @@ app.post('/webhook', async (req, res) => {
                     let fromCurrency = detectCurrency(textRaw, 'USD'); 
                     let targetCurrency = textRaw.includes('בשקלים') || textRaw.includes('לשקל') ? 'ILS' : detectCurrency(textRaw, 'ILS');
 
-                    // אם המשתמש שאל למשל "כמה זה 50 שקל בדולרים"
                     if ((textRaw.includes('שקל') || textRaw.includes('שח') || textRaw.includes('₪')) && !textRaw.startsWith('כמה זה שקל')) {
                         fromCurrency = 'ILS';
                     }
@@ -165,9 +164,155 @@ app.post('/webhook', async (req, res) => {
                             `💡 אם קיבלתם החזר כספי, כתבו מינוס: \`-100 ביט מחבר\`.\n\n` +
                             `3️⃣ *בדיקת מצב:* \n` +
                             `💡 כתבו: \`סיכום\` ותקבלו פירוט מלא ומד התקדמות.\n\n` +
-                            `4️⃣ *מחשבון המרה חי (חדש!):* \n` +
+                            `4️⃣ *מחשבון המרה חי:* \n` +
                             `💡 רוצים לדעת שערים בלי קשר לתקציב? שאלו אותי: \`כמה זה 100 דולר בשקלים?\` 🧮\n\n` +
                             `5️⃣ *טעיתם בהקלדה?* כתבו \`מחיקה\`. לחודש חדש? כתבו \`איפוס\`.`;
             }
             
-            // === 3. פקוד
+            // === 3. פקודת איפוס ===
+            else if (['איפוס', 'reset'].includes(textLower)) {
+                await supabase.from('expenses').delete().eq('phone_number', fromNumber);
+                await supabase.from('user_budgets').update({ budget: 0, remaining: 0 }).eq('phone_number', fromNumber);
+                replyText = "🔄 אופסנו הכול! איזה כיף להתחיל נקי ✨\nכתבו 'תקציב' בשילוב סכום כדי להתחיל.";
+            }
+
+            // === 4. פקודת מחיקת הוצאה אחרונה ===
+            else if (['מחיקה', 'ביטול', 'delete', 'undo'].includes(textLower)) {
+                const { data: lastExpenses } = await supabase
+                    .from('expenses')
+                    .select('*')
+                    .eq('phone_number', fromNumber)
+                    .order('created_at', { ascending: false })
+                    .limit(1);
+
+                if (!lastExpenses || lastExpenses.length === 0) {
+                    replyText = "📭 לא מצאתי אף הוצאה קודמת למחוק!";
+                } else {
+                    const lastExp = lastExpenses[0];
+                    await supabase.from('expenses').delete().eq('id', lastExp.id);
+                    
+                    const updatedRemaining = user.remaining + lastExp.amount_original; 
+                    await supabase.from('user_budgets').update({ remaining: updatedRemaining }).eq('phone_number', fromNumber);
+
+                    replyText = `🗑️ *בוטל בהצלחה:* "${lastExp.description}" על סך ${formatCurrency(lastExp.amount_original, user.display_currency)} נמחק.\n` +
+                                `💰 היתרה המעודכנת שלכם: ${formatCurrency(updatedRemaining, user.display_currency)}`;
+                }
+            }
+            
+            // === 5. פקודת הגדרת תקציב ===
+            else if (textLower.startsWith('תקציב')) {
+                const numberMatch = textRaw.match(/(-?\d[\d,.]*)/);
+                if (numberMatch) {
+                    const amount = parseFloat(numberMatch[1].replace(/,/g, ''));
+                    const currency = detectCurrency(textRaw, user.display_currency); 
+
+                    await supabase.from('expenses').delete().eq('phone_number', fromNumber); 
+                    await supabase.from('user_budgets').update({ 
+                        budget: amount, 
+                        remaining: amount,
+                        display_currency: currency 
+                    }).eq('phone_number', fromNumber);
+
+                    replyText = `💰 הוגדר תקציב חדש: ${formatCurrency(amount, currency)}.\nנשאר לכם: ${formatCurrency(amount, currency)}`;
+                } else {
+                    replyText = "לא הבנתי את הסכום 😅 נסו: 'תקציב 3000' או 'תקציב 500$'";
+                }
+            }
+
+            // === 6. פקודת סיכום ===
+            else if (['סיכום', 'הוצאות', 'סטטוס'].includes(textLower)) {
+                const { data: expenses } = await supabase.from('expenses').select('*').eq('phone_number', fromNumber).order('created_at', { ascending: true });
+                
+                if (!expenses || expenses.length === 0) {
+                    replyText = `📊 *סטטוס תקציב:*\n\n` +
+                                `עדיין לא נרשמו הוצאות החודש. נקי ונוצץ! ✨\n\n` +
+                                `💰 תקציב: ${formatCurrency(user.budget, user.display_currency)}\n` +
+                                `💵 יתרה: ${formatCurrency(user.remaining, user.display_currency)}`;
+                } else {
+                    let listLines = expenses.map((exp, i) => {
+                        const origAmountForm = formatCurrency(exp.amount_original, user.display_currency);
+                        const categoryEmoji = exp.category ? exp.category.split(' ')[0] : '📝';
+                        return `${i + 1}. ${categoryEmoji} *${origAmountForm}* – ${exp.description}`;
+                    });
+
+                    const progressBar = generateProgressBar(user.remaining, user.budget);
+                    const totalSpent = user.budget - user.remaining;
+
+                    replyText = `📊 *סיכום התקציב שלכם:*\n` +
+                                `---------------------------\n` +
+                                `${listLines.join('\n')}\n` +
+                                `---------------------------\n\n` +
+                                `${progressBar}\n\n` +
+                                `📉 סה"כ בוזבז: ${formatCurrency(totalSpent, user.display_currency)}\n` +
+                                `💵 נשאר בארנק: ${formatCurrency(user.remaining, user.display_currency)}\n` +
+                                `💰 תקציב מקורי: ${formatCurrency(user.budget, user.display_currency)}`;
+                    
+                    if (user.remaining < 0) {
+                        replyText += `\n\n⚠️ *שימו לב:* חרגתם מהתקציב ב- ${formatCurrency(Math.abs(user.remaining), user.display_currency)}! 😱`;
+                    }
+                }
+            }
+
+            // === 7. פקודת הוספת הוצאה / זיכוי ===
+            else if (/-?\d/.test(textRaw)) {
+                if (user.budget === 0) {
+                    replyText = "📝 קודם מגדירות תקציב, סיס! נסו: 'תקציב 3000' או 'תקציב 500$'";
+                } else {
+                    const numberMatch = textRaw.match(/(-?\d[\d,.]*)/);
+                    if (numberMatch) {
+                        const amountOriginal = parseFloat(numberMatch[1].replace(/,/g, ''));
+                        
+                        let description = textRaw.replace(numberMatch[0], '').replace(/(דולר|יורו|אירו|שקל|ש"ח|₪|\$|€)/g, '').trim();
+                        if (!description) description = amountOriginal < 0 ? 'זיכוי/החזר' : 'הוצאה כללית';
+
+                        const category = autoCategory(description);
+
+                        await supabase.from('expenses').insert([{
+                            phone_number: fromNumber,
+                            amount_ils: amountOriginal, 
+                            amount_original: amountOriginal,
+                            currency_original: user.display_currency,
+                            description: description,
+                            category: category
+                        }]);
+
+                        const newRemaining = user.remaining - amountOriginal;
+                        await supabase.from('user_budgets').update({ remaining: newRemaining }).eq('phone_number', fromNumber);
+
+                        if (amountOriginal < 0) {
+                            replyText = `💰 *איזה כיף, החזר!* \nנוסף זיכוי של ${formatCurrency(Math.abs(amountOriginal), user.display_currency)} עבור "${description}".\n` +
+                                        `💵 יתרה מעודכנת: ${formatCurrency(newRemaining, user.display_currency)}`;
+                        } else {
+                            replyText = `➕ *נרשמה הוצאה:* ${formatCurrency(amountOriginal, user.display_currency)} [${category.split(' ')[0]}]\n` +
+                                        `✍️ עבור: "${description}"\n` +
+                                        `💵 נשאר בתקציב: ${formatCurrency(newRemaining, user.display_currency)}`;
+                            
+                            if (newRemaining < 0) replyText += ` ⚠️ (אתם במינוס!)`;
+                        }
+                    }
+                }
+            }
+
+            // שליחה חזרה לוואטסאפ
+            const whatsappToken = process.env.WHATSAPP_TOKEN; 
+            const phoneId = body.entry[0].changes[0].value.metadata.phone_number_id;
+
+            await axios.post(`https://graph.facebook.com/v17.0/${phoneId}/messages`, {
+                messaging_product: 'whatsapp',
+                to: fromNumber,
+                type: 'text',
+                text: { body: replyText }
+            }, {
+                headers: { 'Authorization': `Bearer ${whatsappToken}` }
+            });
+        }
+
+        res.sendStatus(200);
+    } catch (error) {
+        console.error('Error handling webhook:', error.response?.data || error.message);
+        res.sendStatus(200);
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
