@@ -1,6 +1,6 @@
 const express = require('express');
 const axios = require('axios');
-const { createClient } = require('@supabase/supabase-client');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(express.json());
