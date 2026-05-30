@@ -41,19 +41,11 @@ async function fetchLiveRates() {
 }
 
 // ─── Currency Detection ───────────────────────────────────────────────────────
-// Handles natural Hebrew plurals / variants + symbols + Latin codes.
 function detectCurrency(text, defaultCur) {
     const t = text;
-
-    // EUR — check before ILS/USD so "יורו" doesn't fall through
     if (/€|יורו|אירו|יורואים|אירואים|eur/i.test(t)) return 'EUR';
-
-    // USD
     if (/\$|דולר|דולרים|usd/i.test(t)) return 'USD';
-
-    // ILS
     if (/₪|שקל|שקלים|ש"ח|שח|ils/i.test(t)) return 'ILS';
-
     return defaultCur;
 }
 
@@ -70,7 +62,7 @@ function autoCategory(description) {
     if (/(סושי|פיצה|קפה|מסעדה|אוכל|בורגר|שוקולד|סופר|מכולת|חלב|לחם|גלידה|בר|בירה|יין)/.test(d)) return '🍔 אוכל וסטארבקס';
     if (/(מונית|גט|אובר|דלק|רכבת|אוטובוס|חניה|פנגו|טסלה|טיסה|מלון)/.test(d)) return '🚗 תחבורה וטיולים';
     if (/(זארה|שיין|בגדים|נעליים|אסוס|קניון|חולצה|אמזון|עליאקספרס)/.test(d)) return '🛍️ שופינג וביזבוזים';
-    if (/(סרט|הופעה|מסיבה|פאב|בר|כרטיס|מוזיאון|באד באני|בילוים)/.test(d)) return '🎉 כיף ובילויים';
+    if (/(סרט|הופעה|מסיבה|פאב|בר|כרטיס|מוזיאון|באד באני|בילוים|בילויים)/.test(d)) return '🎉 כיף ובילויים';
     if (/(ביט|החזר|חבר|מתנה|זיכוי)/.test(d)) return '💰 החזרים ומתנות';
     return '📝 כללי';
 }
@@ -86,17 +78,12 @@ function generateProgressBar(remaining, budget) {
 }
 
 // ─── Send WhatsApp message ────────────────────────────────────────────────────
-// Always uses process.env.WHATSAPP_PHONE_NUMBER_ID — never the payload metadata.
 async function sendWhatsApp(to, body) {
     const token = process.env.WHATSAPP_TOKEN;
     const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
 
-    if (!token) {
-        console.error('sendWhatsApp: WHATSAPP_TOKEN env var is not set.');
-        return;
-    }
-    if (!phoneNumberId) {
-        console.error('sendWhatsApp: WHATSAPP_PHONE_NUMBER_ID env var is not set.');
+    if (!token || !phoneNumberId) {
+        console.error('sendWhatsApp: Environment variables missing.');
         return;
     }
 
@@ -112,13 +99,10 @@ async function sendWhatsApp(to, body) {
 }
 
 // ─── Safe Supabase wrapper ────────────────────────────────────────────────────
-// Returns { data, error } — never throws; logs the error for visibility.
 async function dbQuery(fn) {
     try {
         const result = await fn();
-        if (result.error) {
-            console.error('Supabase error:', result.error);
-        }
+        if (result.error) console.error('Supabase error:', result.error);
         return result;
     } catch (err) {
         console.error('Unexpected DB error:', err.message);
@@ -126,17 +110,15 @@ async function dbQuery(fn) {
     }
 }
 
-// ─── Ensure user row exists (handles first-time / empty table) ────────────────
+// ─── Ensure user row exists ───────────────────────────────────────────────────
 async function getOrCreateUser(fromNumber) {
     const { data: existing, error: selectErr } = await dbQuery(() =>
         supabase.from('user_budgets').select('*').eq('phone_number', fromNumber).maybeSingle()
     );
 
     if (selectErr) return { user: null, dbError: selectErr.message };
-
     if (existing) return { user: existing, dbError: null };
 
-    // New user — insert a fresh row
     const { data: created, error: insertErr } = await dbQuery(() =>
         supabase
             .from('user_budgets')
@@ -161,7 +143,6 @@ app.get('/webhook', (req, res) => {
 
 // ─── Main webhook handler ─────────────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
-    // Always acknowledge Meta immediately
     res.sendStatus(200);
 
     try {
@@ -174,18 +155,17 @@ app.post('/webhook', async (req, res) => {
         const textRaw = message.text.body.trim();
         const textLower = textRaw.toLowerCase();
 
-        // Helper: send reply
         const reply = (text) => sendWhatsApp(fromNumber, text);
 
         // ── Load / create user ────────────────────────────────────────────────
         const { user, dbError: userLoadError } = await getOrCreateUser(fromNumber);
 
         if (userLoadError || !user) {
-            await reply(`⚠️ שגיאת מסד נתונים בטעינת הפרופיל שלכם:\n${userLoadError || 'unknown error'}\nנסו שוב בעוד כמה שניות.`);
+            await reply(`⚠️ שגיאת מסד נתונים בטעינת הפרופיל שלכם:\n${userLoadError}\nנסו שוב בעוד כמה שניות.`);
             return;
         }
 
-        // ── 1. Currency Calculator (explicit, live rates) ─────────────────────
+        // ── 1. Currency Calculator ────────────────────────────────────────────
         if (
             textLower.includes('כמה זה') ||
             textLower.includes('בשקלים') ||
@@ -202,23 +182,19 @@ app.post('/webhook', async (req, res) => {
             const amount = parseFloat(numberMatch[1].replace(/,/g, ''));
             const rates = await fetchLiveRates();
 
-            // Determine source & target currencies
             const isTargetILS = textLower.includes('בשקלים') || textLower.includes('לשקל');
             const isTargetUSD = textLower.includes('בדולרים');
             const isTargetEUR = textLower.includes('ביורו');
 
-            // Detect source from the rest of the text (minus the number)
             const textWithoutNum = textRaw.replace(numberMatch[0], '');
             let fromCurrency = detectCurrency(textWithoutNum, 'USD');
 
-            // If no explicit source detected, try the whole string (user may write "100 דולר בשקלים")
             if (fromCurrency === 'USD' && !(/דולר|דולרים|\$|usd/i.test(textWithoutNum))) {
                 fromCurrency = detectCurrency(textRaw, 'USD');
             }
 
             let targetCurrency = isTargetILS ? 'ILS' : isTargetUSD ? 'USD' : isTargetEUR ? 'EUR' : 'ILS';
 
-            // If source and target are identical, flip
             if (fromCurrency === targetCurrency) {
                 targetCurrency = targetCurrency === 'ILS' ? 'USD' : 'ILS';
             }
@@ -229,7 +205,7 @@ app.post('/webhook', async (req, res) => {
             else if (fromCurrency === 'ILS' && targetCurrency === 'USD') result = amount / rates.USD;
             else if (fromCurrency === 'ILS' && targetCurrency === 'EUR') result = amount / rates.EUR;
             else {
-                await reply('לא הצלחתי לחשב את ההמרה 🤯 נסו: "כמה זה 100 דולר בשקלים" או "כמה זה 250 שקל ביורו".');
+                await reply('לא הצלחתי לחשב את ההמרה 🤯 נסו: "כמה זה 100 דולר בשקלים"');
                 return;
             }
 
@@ -251,12 +227,12 @@ app.post('/webhook', async (req, res) => {
                 `3️⃣ *בדיקת מצב:* כתבו \`סיכום\`.\n\n` +
                 `4️⃣ *מחשבון מט"ח חי:*\n` +
                 `💡 \`כמה זה 100 דולר בשקלים?\` 🧮\n\n` +
-                `5️⃣ *טעות?* כתבו \`מחיקה\`. חודש חדש? \`איפוס\`.`
+                `5️⃣ *טעות בספרות?* כתבו \`מחיקה\` כדי לבחור שורה להסרה. חודש חדש? \`איפוס\`.`
             );
             return;
         }
 
-        // ── 3. Reset ──────────────────────────────────────────────────────────
+        // ── 3. Reset (Fixed to "איפסנו") ──────────────────────────────────────
         if (['איפוס', 'reset'].includes(textLower)) {
             const { error: delErr } = await dbQuery(() =>
                 supabase.from('expenses').delete().eq('phone_number', fromNumber)
@@ -272,56 +248,93 @@ app.post('/webhook', async (req, res) => {
                 await reply(`⚠️ שגיאת מסד נתונים באיפוס התקציב:\n${updErr.message}`);
                 return;
             }
-            await reply("🔄 אופסנו הכול! איזה כיף להתחיל נקי ✨\nכתבו 'תקציב' בשילוב סכום כדי להתחיל.");
+            await reply("🔄 איפסנו את הכול! איזה כיף להתחיל נקי ✨\nכתבו 'תקציב' בשילוב סכום כדי להתחיל.");
             return;
         }
 
-        // ── 4. Delete Last Expense ────────────────────────────────────────────
-        if (['מחיקה', 'ביטול', 'delete', 'undo'].includes(textLower)) {
-            const { data: lastExpenses, error: fetchErr } = await dbQuery(() =>
+        // ── 4. Smart Delete (By Row Number) ───────────────────────────────────
+        const isDeleteCommand = ['מחיקה', 'ביטול', 'delete', 'undo'].includes(textLower);
+        const matchSpecificDelete = textRaw.match(/^(?:מחק|מחקי|מחיקה|delete)\s+(\d+)$/i);
+        const isJustANumber = /^\d+$/.test(textRaw);
+
+        if (isDeleteCommand || matchSpecificDelete || isJustANumber) {
+            // Fetch all expenses to know the order
+            const { data: expenses, error: fetchErr } = await dbQuery(() =>
                 supabase
                     .from('expenses')
                     .select('*')
                     .eq('phone_number', fromNumber)
-                    .order('created_at', { ascending: false })
-                    .limit(1)
+                    .order('created_at', { ascending: true })
             );
 
             if (fetchErr) {
-                await reply(`⚠️ שגיאת מסד נתונים בשליפת ההוצאה האחרונה:\n${fetchErr.message}`);
+                await reply(`⚠️ שגיאת מסד נתונים בשליפת ההוצאות:\n${fetchErr.message}`);
                 return;
             }
 
-            if (!lastExpenses || lastExpenses.length === 0) {
-                await reply('📭 לא מצאתי אף הוצאה קודמת למחוק!');
+            if (!expenses || expenses.length === 0) {
+                await reply('📭 לא מצאתי אף הוצאה קודמת ברשימה שלכם!');
                 return;
             }
 
-            const lastExp = lastExpenses[0];
+            // Case A: User typed just "מחיקה" -> Show the numbered list and ask which one to delete
+            if (isDeleteCommand) {
+                const cur = user.display_currency;
+                const listLines = expenses.map((exp, i) => {
+                    const emoji = exp.category ? exp.category.split(' ')[0] : '📝';
+                    return `[${i + 1}] ${emoji} *${formatCurrency(exp.amount_original, cur)}* – ${exp.description}`;
+                });
 
-            const { error: delErr } = await dbQuery(() =>
-                supabase.from('expenses').delete().eq('id', lastExp.id)
-            );
-            if (delErr) {
-                await reply(`⚠️ שגיאת מסד נתונים במחיקת ההוצאה:\n${delErr.message}`);
+                await reply(
+                    `🗑️ *איזו הוצאה תרצי למחוק?*\n\n` +
+                    `${listLines.join('\n')}\n\n` +
+                    `✍️ *שלחי לי רק את מספר השורה שברצונך להסיר* (למשל: 2).`
+                );
                 return;
             }
 
-            // 1-to-1: restore original amount in display_currency
-            const updatedRemaining = user.remaining + lastExp.amount_original;
-            const { error: updErr } = await dbQuery(() =>
-                supabase.from('user_budgets').update({ remaining: updatedRemaining }).eq('phone_number', fromNumber)
-            );
-            if (updErr) {
-                await reply(`⚠️ שגיאת מסד נתונים בעדכון היתרה:\n${updErr.message}`);
-                return;
+            // Case B: User specified a number (either "מחק 2" or just "2")
+            let targetIndex = null;
+            if (matchSpecificDelete) {
+                targetIndex = parseInt(matchSpecificDelete[1], 10) - 1;
+            } else if (isJustANumber) {
+                targetIndex = parseInt(textRaw, 10) - 1;
             }
 
-            await reply(
-                `🗑️ *בוטל בהצלחה:* "${lastExp.description}" על סך ${formatCurrency(lastExp.amount_original, user.display_currency)} נמחק.\n` +
-                `💰 יתרה מעודכנת: ${formatCurrency(updatedRemaining, user.display_currency)}`
-            );
-            return;
+            if (targetIndex !== null) {
+                if (targetIndex < 0 || targetIndex >= expenses.length) {
+                    await reply(`❌ מספר שורה לא תקין. אנא שלחי מספר בין 1 ל-${expenses.length}.`);
+                    return;
+                }
+
+                const expToDelete = expenses[targetIndex];
+
+                // Delete it from DB
+                const { error: delErr } = await dbQuery(() =>
+                    supabase.from('expenses').delete().eq('id', expToDelete.id)
+                );
+                if (delErr) {
+                    await reply(`⚠️ שגיאת מסד נתונים במחיקת ההוצאה:\n${delErr.message}`);
+                    return;
+                }
+
+                // Restore amount to remaining balance
+                const updatedRemaining = user.remaining + expToDelete.amount_original;
+                const { error: updErr } = await dbQuery(() =>
+                    supabase.from('user_budgets').update({ remaining: updatedRemaining }).eq('phone_number', fromNumber)
+                );
+                if (updErr) {
+                    await reply(`⚠️ שגיאת מסד נתונים בעדכון היתרה:\n${updErr.message}`);
+                    return;
+                }
+
+                await reply(
+                    `🗑️ *השורה נמחקה בהצלחה!*\n` +
+                    `הסרתי את: "${expToDelete.description}" על סך ${formatCurrency(expToDelete.amount_original, user.display_currency)}.\n\n` +
+                    `💰 יתרה מעודכנת: ${formatCurrency(updatedRemaining, user.display_currency)}`
+                );
+                return;
+            }
         }
 
         // ── 5. Set Budget ─────────────────────────────────────────────────────
@@ -335,7 +348,6 @@ app.post('/webhook', async (req, res) => {
             const amount = parseFloat(numberMatch[1].replace(/,/g, ''));
             const currency = detectCurrency(textRaw, user.display_currency);
 
-            // Clear old expenses on new budget
             const { error: delErr } = await dbQuery(() =>
                 supabase.from('expenses').delete().eq('phone_number', fromNumber)
             );
@@ -359,7 +371,7 @@ app.post('/webhook', async (req, res) => {
             return;
         }
 
-        // ── 6. Summary ────────────────────────────────────────────────────────
+        // ── 6. Summary (With Free Automatic Categories breakdown) ──────────────
         if (['סיכום', 'הוצאות', 'סטטוס'].includes(textLower)) {
             const { data: expenses, error: fetchErr } = await dbQuery(() =>
                 supabase
@@ -386,9 +398,23 @@ app.post('/webhook', async (req, res) => {
                 return;
             }
 
+            // Object to calculate category totals
+            const categoryTotals = {};
+
             const listLines = expenses.map((exp, i) => {
-                const emoji = exp.category ? exp.category.split(' ')[0] : '📝';
+                const categoryName = exp.category || '📝 כללי';
+                const emoji = categoryName.split(' ')[0];
+                
+                // Add to category grouping (ignore refunds/credits for breakdown or include them naturally)
+                if (!categoryTotals[categoryName]) categoryTotals[categoryName] = 0;
+                categoryTotals[categoryName] += exp.amount_original;
+
                 return `${i + 1}. ${emoji} *${formatCurrency(exp.amount_original, cur)}* – ${exp.description}`;
+            });
+
+            // Build categories breakdown text
+            const breakdownLines = Object.entries(categoryTotals).map(([cat, total]) => {
+                return `• ${cat}: *${formatCurrency(total, cur)}*`;
             });
 
             const totalSpent = user.budget - user.remaining;
@@ -398,6 +424,9 @@ app.post('/webhook', async (req, res) => {
                 `📊 *סיכום התקציב שלכם:*\n` +
                 `---------------------------\n` +
                 `${listLines.join('\n')}\n` +
+                `---------------------------\n\n` +
+                `🍕 *פילוח לפי קטגוריות:*\n` +
+                `${breakdownLines.join('\n')}\n` +
                 `---------------------------\n\n` +
                 `${progressBar}\n\n` +
                 `📉 סה"כ בוזבז: ${formatCurrency(totalSpent, cur)}\n` +
@@ -431,11 +460,10 @@ app.post('/webhook', async (req, res) => {
 
             const category = autoCategory(description);
 
-            // 1-to-1: store in user's display_currency with no conversion
             const { error: insErr } = await dbQuery(() =>
                 supabase.from('expenses').insert([{
                     phone_number: fromNumber,
-                    amount_ils: amountOriginal,          // kept for schema compat
+                    amount_ils: amountOriginal,
                     amount_original: amountOriginal,
                     currency_original: user.display_currency,
                     description,
@@ -447,7 +475,6 @@ app.post('/webhook', async (req, res) => {
                 return;
             }
 
-            // 1-to-1 balance update
             const newRemaining = user.remaining - amountOriginal;
             const { error: updErr } = await dbQuery(() =>
                 supabase.from('user_budgets').update({ remaining: newRemaining }).eq('phone_number', fromNumber)
@@ -475,11 +502,9 @@ app.post('/webhook', async (req, res) => {
             return;
         }
 
-        // ── Default / Unknown ─────────────────────────────────────────────────
         await reply("לא בטוחה שהבנתי 🫣\nכתבו 'היי' כדי לקבל את רשימת הפקודות המלאה!");
 
     } catch (err) {
-        // Top-level safety net — should rarely fire given per-operation error handling above
         console.error('Unhandled webhook error:', err.message, err.stack);
     }
 });
