@@ -1,6 +1,7 @@
 {
-  "name": "whatsapp-budget-bot",
+  "name": "budget-queen-bot",
   "version": "1.0.0",
+  "description": "WhatsApp Budget Bot with Supabase",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -9,5 +10,5 @@
     "express": "^4.18.2",
     "axios": "^1.6.2",
     "@supabase/supabase-client": "^2.39.0"
-  },
+  }
 }
