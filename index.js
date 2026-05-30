@@ -86,24 +86,23 @@ function generateProgressBar(remaining, budget) {
 }
 
 // ─── Send WhatsApp message ────────────────────────────────────────────────────
-// phoneId: extracted from webhook payload metadata; falls back to env var if missing.
-async function sendWhatsApp(phoneId, to, body) {
+// Always uses process.env.WHATSAPP_PHONE_NUMBER_ID — never the payload metadata.
+async function sendWhatsApp(to, body) {
     const token = process.env.WHATSAPP_TOKEN;
+    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+
     if (!token) {
-        console.error('sendWhatsApp: WHATSAPP_TOKEN is not set.');
+        console.error('sendWhatsApp: WHATSAPP_TOKEN env var is not set.');
         return;
     }
-
-    // Prefer the live payload value; fall back to the env var as a safety net.
-    const resolvedPhoneId = phoneId || process.env.WHATSAPP_PHONE_NUMBER_ID;
-    if (!resolvedPhoneId) {
-        console.error('sendWhatsApp: phone_number_id is missing from payload and WHATSAPP_PHONE_NUMBER_ID env var is not set.');
+    if (!phoneNumberId) {
+        console.error('sendWhatsApp: WHATSAPP_PHONE_NUMBER_ID env var is not set.');
         return;
     }
 
     try {
         await axios.post(
-            `https://graph.facebook.com/v21.0/${resolvedPhoneId}/messages`,
+            `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
             { messaging_product: 'whatsapp', to, type: 'text', text: { body } },
             { headers: { Authorization: `Bearer ${token}` } }
         );
@@ -172,21 +171,11 @@ app.post('/webhook', async (req, res) => {
         if (message.type !== 'text') return;
 
         const fromNumber = message.from;
-        // Extract phone_number_id from Meta's metadata; fall back to env var as a safety net.
-        // This must match the phone number registered in your Meta App Dashboard.
-        const phoneId =
-            body.entry[0].changes[0].value.metadata?.phone_number_id ||
-            process.env.WHATSAPP_PHONE_NUMBER_ID;
-
-        if (!phoneId) {
-            console.error('Webhook: phone_number_id missing from payload and WHATSAPP_PHONE_NUMBER_ID env var not set.');
-            return;
-        }
         const textRaw = message.text.body.trim();
         const textLower = textRaw.toLowerCase();
 
-        // Helper: send reply and log
-        const reply = (text) => sendWhatsApp(phoneId, fromNumber, text);
+        // Helper: send reply
+        const reply = (text) => sendWhatsApp(fromNumber, text);
 
         // ── Load / create user ────────────────────────────────────────────────
         const { user, dbError: userLoadError } = await getOrCreateUser(fromNumber);
