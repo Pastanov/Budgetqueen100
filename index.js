@@ -5,16 +5,16 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 app.use(express.json());
 
-// חיבור ל-Supabase באמצעות המשתנים שהגדרנו ב-Render
+// חיבור ל-Supabase
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// שערים כגיבוי (אם ה-API החי לא עובד)
+// שערים כגיבוי
 const DEFAULT_RATES = { ILS: 1.0, USD: 3.7, EUR: 4.0 };
 const CURRENCY_SYMBOLS = { ILS: '₪', USD: '$', EUR: '€' };
 
-// מנגנון הבאת שערים חיים (מט"ח)
+// מנגנון הבאת שערים חיים עבור פקודת ההמרה המפורשת
 async function fetchLiveRates() {
     try {
         const usdResp = await axios.get('https://api.frankfurter.app/latest?from=USD&to=ILS', { timeout: 2000 });
@@ -46,7 +46,33 @@ function formatCurrency(amount, currency) {
     return currency === 'ILS' ? `${Math.round(amount)} ${symbol}` : `${symbol}${Math.round(amount)}`;
 }
 
-// אימות ה-Webhook מול מטא (קורה רק פעם אחת בחיבור)
+// תיוג קטגוריות אוטומטי
+function autoCategory(description) {
+    const desc = description.toLowerCase();
+    if (/(סושי|פיצה|קפה|מסעדה|אוכל|בורגר|שוקולד|סופר|מכולת|חלב|לחם|גלידה|בר|בירה|יין)/.test(desc)) return '🍔 אוכל וסטארבקס';
+    if (/(מונית|גט|אובר|דלק|רכבת|אוטובוס|חניה|פנגו|טסלה|טיסה|מלון)/.test(desc)) return '🚗 תחבורה וטיולים';
+    if (/(זארה|שיין|בגדים|נעליים|אסוס|קניון|חולצה|אמזון|עליאקספרס)/.test(desc)) return '🛍️ שופינג וביזבוזים';
+    if (/(סרט|הופעה|מסיבה|פאב|בר|כרטיס|מוזיאון|באד באני|בילוים)/.test(desc)) return '🎉 כיף ובילויים';
+    if (/(ביט|החזר|חבר|מתנה|זיכוי)/.test(desc)) return '💰 החזרים ומתנות';
+    return '📝 כללי';
+}
+
+// מד התקדמות ויזואלי
+function generateProgressBar(remaining, budget) {
+    if (budget <= 0) return '';
+    const pct = Math.max(0, Math.min(100, (remaining / budget) * 100));
+    const totalBlocks = 10;
+    const greenBlocks = Math.round((pct / 100) * totalBlocks);
+    const whiteBlocks = totalBlocks - greenBlocks;
+    
+    let bar = '🟩'.repeat(greenBlocks) + '⬜'.repeat(whiteBlocks);
+    if (pct <= 20) {
+        bar = '🟥'.repeat(greenBlocks) + '⬜'.repeat(whiteBlocks);
+    }
+    return `${bar} (${Math.round(pct)}% נותר)`;
+}
+
+// אימות ה-Webhook מול מטא
 app.get('/webhook', (req, res) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
@@ -66,16 +92,15 @@ app.post('/webhook', async (req, res) => {
     try {
         const body = req.body;
 
-        // בדיקה שמדובר בהודעת וואטסאפ רגילה
         if (body.object === 'whatsapp_business_account' && body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
             const msg = body.entry[0].changes[0].value.messages[0];
-            const fromNumber = msg.from; // מספר הוואטסאפ של המשתמש
+            const fromNumber = msg.from;
             
             if (msg.type !== 'text') return res.sendStatus(200);
             const textRaw = msg.text.body.trim();
             const textLower = textRaw.toLowerCase();
 
-            // 1. שליפת מצב המשתמש מ-Supabase (או יצירת משתמש חדש אם הוא לא קיים)
+            // שליפת מצב המשתמש מ-Supabase
             let { data: user, error: userError } = await supabase
                 .from('user_budgets')
                 .select('*')
@@ -83,7 +108,7 @@ app.post('/webhook', async (req, res) => {
                 .single();
 
             if (!user) {
-                const { data: newUser, error: createError } = await supabase
+                const { data: newUser } = await supabase
                     .from('user_budgets')
                     .insert([{ phone_number: fromNumber, budget: 0, remaining: 0, display_currency: 'ILS' }])
                     .select()
@@ -91,132 +116,58 @@ app.post('/webhook', async (req, res) => {
                 user = newUser;
             }
 
-            let replyText = "לא בטוחה שהבנתי 🫣\nדוגמאות: 💰 תקציב 3000 | 🍕 20$ פיצה | 📊 סיכום | 🔄 איפוס";
+            let replyText = "לא בטוחה שהבנתי 🫣\nכתבו 'היי' כדי לקבל את רשימת הפקודות המלאה!";
 
-            // === פקודת איפוס ===
-            if (['איפוס', 'reset', 'start'].includes(textLower)) {
-                await supabase.from('expenses').delete().eq('phone_number', fromNumber);
-                await supabase.from('user_budgets').update({ budget: 0, remaining: 0 }).eq('phone_number', fromNumber);
-                replyText = "🔄 אופסנו הכול! איזה כיף להתחיל נקי ✨\nכתבי למשל: 'תקציב 3000' כדי להתחיל.";
-            }
-            
-            // === פקודת הגדרת תקציב ===
-            else if (textLower.startsWith('תקציב')) {
+            // === 1. פקודת המרה חכמה ומפורשת (מחשבון מט"ח לפי דרישה בלבד) ===
+            if (textLower.includes('כמה זה') || textLower.includes('בשקלים') || textLower.includes('לשקל') || textLower.includes('בדולרים') || textLower.includes('ביורו')) {
                 const numberMatch = textRaw.match(/(\d[\d,.]*)/);
                 if (numberMatch) {
                     const amount = parseFloat(numberMatch[1].replace(/,/g, ''));
-                    const currency = detectCurrency(textRaw, user.display_currency);
                     const rates = await fetchLiveRates();
                     
-                    // המרה לשקלים לצורך שמירה בבסיס הנתונים
-                    const amountIls = amount * (rates[currency] || 1);
+                    let fromCurrency = detectCurrency(textRaw, 'USD'); 
+                    let targetCurrency = textRaw.includes('בשקלים') || textRaw.includes('לשקל') ? 'ILS' : detectCurrency(textRaw, 'ILS');
 
-                    await supabase.from('expenses').delete().eq('phone_number', fromNumber); // מוחק הוצאות קודמות
-                    await supabase.from('user_budgets').update({ 
-                        budget: amountIls, 
-                        remaining: amountIls,
-                        display_currency: currency 
-                    }).eq('phone_number', fromNumber);
-
-                    replyText = `💰 הוגדר תקציב חדש: ${formatCurrency(amount, currency)}.\nנשאר לך: ${formatCurrency(amount, currency)}`;
-                } else {
-                    replyText = "לא הבנתי את הסכום 😅 נסי: 'תקציב 3000' או 'תקציב 1500$'";
-                }
-            }
-
-            // === פקודת סיכום ===
-            else if (['סיכום', 'הוצאות'].includes(textLower)) {
-                const { data: expenses } = await supabase.from('expenses').select('*').eq('phone_number', fromNumber).order('created_at', { ascending: true });
-                
-                if (!expenses || expenses.length === 0) {
-                    replyText = `עדיין לא נרשמו הוצאות.\nיתרה: ${formatCurrency(user.remaining, user.display_currency)}`;
-                } else {
-                    const rates = await fetchLiveRates();
-                    const userRate = rates[user.display_currency] || 1;
-
-                    let listLines = expenses.map((exp, i) => {
-                        const originalAmountFormatted = formatCurrency(exp.amount_original, exp.currency_original);
-                        return `${i + 1}. ${originalAmountFormatted} – ${exp.description}`;
-                    });
-
-                    const totalInUserCurrency = (user.budget - user.remaining) / userRate;
-                    const remainingInUserCurrency = user.remaining / userRate;
-                    const budgetInUserCurrency = user.budget / userRate;
-
-                    replyText = `📊 *סיכום חמוד:*\n${listLines.join('\n')}\n\n` +
-                                `סה"כ הוצאות: ${formatCurrency(totalInUserCurrency, user.display_currency)}\n` +
-                                `יתרה: ${formatCurrency(remainingInUserCurrency, user.display_currency)}\n` +
-                                `תקציב: ${formatCurrency(budgetInUserCurrency, user.display_currency)}`;
-                    
-                    if (remainingInUserCurrency < 0) {
-                        replyText += `\n⚠️ שימי לב, את במינוס של ${formatCurrency(Math.abs(remainingInUserCurrency), user.display_currency)}!`;
+                    // אם המשתמש שאל למשל "כמה זה 50 שקל בדולרים"
+                    if ((textRaw.includes('שקל') || textRaw.includes('שח') || textRaw.includes('₪')) && !textRaw.startsWith('כמה זה שקל')) {
+                        fromCurrency = 'ILS';
                     }
-                }
-            }
 
-            // === פקודת הוספת הוצאה (אם המשפט מכיל מספר) ===
-            else if (/\d/.test(textRaw)) {
-                if (user.budget === 0) {
-                    replyText = "📝 קודם מגדירות תקציב, סיס! נסי: 'תקציב 3000' או 'תקציב 500$'";
-                } else {
-                    const numberMatch = textRaw.match(/(\d[\d,.]*)/);
-                    if (numberMatch) {
-                        const amountOriginal = parseFloat(numberMatch[1].replace(/,/g, ''));
-                        const currencyOriginal = detectCurrency(textRaw, user.display_currency);
-                        const rates = await fetchLiveRates();
-                        
-                        const amountIls = amountOriginal * (rates[currencyOriginal] || 1);
-                        
-                        // ניקוי הטקסט כדי להבין מה התיאור (מוריד את המספר והמטבע)
-                        let description = textRaw.replace(numberMatch[0], '').replace(/(דולר|יורו|אירו|שקל|ש"ח|₪|\$|€)/g, '').trim();
-                        if (!description) description = 'הוצאה כללית';
-
-                        // שמירת ההוצאה ב-Supabase
-                        await supabase.from('expenses').insert([{
-                            phone_number: fromNumber,
-                            amount_ils: amountIls,
-                            amount_original: amountOriginal,
-                            currency_original: currencyOriginal,
-                            description: description
-                        }]);
-
-                        // עדכון היתרה החדשה
-                        const newRemaining = user.remaining - amountIls;
-                        await supabase.from('user_budgets').update({ remaining: newRemaining }).eq('phone_number', fromNumber);
-
-                        const userRate = rates[user.display_currency] || 1;
-                        const remainingInUserCurrency = newRemaining / userRate;
-
-                        replyText = `➕ נוספה הוצאה: ${formatCurrency(amountOriginal, currencyOriginal)} עבור "${description}".\n` +
-                                    `נשאר בתקציב: ${formatCurrency(remainingInUserCurrency, user.display_currency)}`;
-                        
-                        if (remainingInUserCurrency < 0) {
-                            replyText += ` ⚠️ (את במינוס)`;
-                        }
+                    if (fromCurrency === 'USD' && targetCurrency === 'ILS') {
+                        const result = amount * rates.USD;
+                        replyText = `🧮 *מחשבון המרה:* \n${formatCurrency(amount, 'USD')} שווים כיום ל-*${formatCurrency(result, 'ILS')}*.`;
+                    } else if (fromCurrency === 'EUR' && targetCurrency === 'ILS') {
+                        const result = amount * rates.EUR;
+                        replyText = `🧮 *מחשבון המרה:* \n${formatCurrency(amount, 'EUR')} שווים כיום ל-*${formatCurrency(result, 'ILS')}*.`;
+                    } else if (fromCurrency === 'ILS' && targetCurrency === 'USD') {
+                        const result = amount / rates.USD;
+                        replyText = `🧮 *מחשבון המרה:* \n${formatCurrency(amount, 'ILS')} שווים כיום ל-*${formatCurrency(result, 'USD')}*.`;
+                    } else if (fromCurrency === 'ILS' && targetCurrency === 'EUR') {
+                        const result = amount / rates.EUR;
+                        replyText = `🧮 *מחשבון המרה:* \n${formatCurrency(amount, 'ILS')} שווים כיום ל-*${formatCurrency(result, 'EUR')}*.`;
+                    } else {
+                        replyText = `לא הצלחתי לחשב את ההמרה המדויקת 🤯 נסו: "כמה זה 100 דולר בשקלים" או "כמה זה 250 שח ביורו".`;
                     }
+                } else {
+                    replyText = `כדי להשתמש במחשבון, אנא ציינו מספר. למשל: "כמה זה 50 דולר בשקלים?".`;
                 }
             }
 
-            // שליחת התשובה חזרה למשתמש בוואטסאפ באמצעות ה-API של מטא
-            const whatsappToken = process.env.WHATSAPP_TOKEN; 
-            const phoneId = body.entry[0].changes[0].value.metadata.phone_number_id;
-
-            await axios.post(`https://graph.facebook.com/v17.0/${phoneId}/messages`, {
-                messaging_product: 'whatsapp',
-                to: fromNumber,
-                type: 'text',
-                text: { body: replyText }
-            }, {
-                headers: { 'Authorization': `Bearer ${whatsappToken}` }
-            });
-        }
-
-        res.sendStatus(200);
-    } catch (error) {
-        console.error('Error handling webhook:', error.response?.data || error.message);
-        res.sendStatus(200); // מחזירים 200 למטא כדי שלא יחסמו את השרת שלנו במקרה של שגיאה
-    }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+            // === 2. פקודת ברכה והסבר ===
+            else if (['הי', 'היי', 'שלום', 'הלו', 'היוש', 'start', 'help', 'עזרה'].some(v => textLower.startsWith(v))) {
+                replyText = `👋 *היי ברוכים הבאים!* \n` +
+                            `אני ה-*Budget Queen* 👑 ואני כאן כדי לעזור לכם לנהל את התקציב שלכם ישירות מהוואטסאפ!\n\n` +
+                            `*איך זה עובד?* 💸\n\n` +
+                            `1️⃣ *הגדרת תקציב:* \n` +
+                            `💡 כתבו: \`תקציב 200$\` או \`תקציב 3000\`. הבוט ינהל את הכל לפי המטבע שהגדרתם!\n\n` +
+                            `2️⃣ *תיעוד הוצאה:* פשוט כתבו סכום ומה קניתם. \n` +
+                            `💡 נסו: \`50 מונית\` או \`12 קפה\`. (הבוט מפחית מהתקציב 1 ל-1 ללא המרות אוטומטיות).\n` +
+                            `💡 אם קיבלתם החזר כספי, כתבו מינוס: \`-100 ביט מחבר\`.\n\n` +
+                            `3️⃣ *בדיקת מצב:* \n` +
+                            `💡 כתבו: \`סיכום\` ותקבלו פירוט מלא ומד התקדמות.\n\n` +
+                            `4️⃣ *מחשבון המרה חי (חדש!):* \n` +
+                            `💡 רוצים לדעת שערים בלי קשר לתקציב? שאלו אותי: \`כמה זה 100 דולר בשקלים?\` 🧮\n\n` +
+                            `5️⃣ *טעיתם בהקלדה?* כתבו \`מחיקה\`. לחודש חדש? כתבו \`איפוס\`.`;
+            }
+            
+            // === 3. פקוד
